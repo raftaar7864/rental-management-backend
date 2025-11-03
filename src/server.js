@@ -11,7 +11,7 @@ const app = express();
 // Allow CLIENT_ORIGIN or default to vite dev server
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://rental-manager-lilac.vercel.app',
+  'https://rentalmanagement.drbiswas.co.in',
 ];
 
 app.use(

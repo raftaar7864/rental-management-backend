@@ -1,6 +1,4 @@
 // backend/src/controllers/billController.js
-
-const fs = require("fs");
 const path = require("path");
 const Bill = require("../models/Bill");
 const Tenant = require("../models/Tenant");
@@ -8,9 +6,8 @@ const Room = require("../models/Room");
 const Building = require("../models/Building");
 const { createOrder } = require("../services/razorpayService");
 const notificationService = require("../services/notificationService");
-const PDFDocument = require("pdfkit");
 
-// AWS v3 S3 client (S3-compatible) & presigner for Cloudflare R2
+// AWS v3 S3 client (Cloudflare R2)
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -20,18 +17,14 @@ const templates = require("../utils/notificationTemplete");
 // unified pdf generator (returns Buffer)
 const { generateBillPdf: generateBillPdfBuffer } = require("../utils/pdf");
 
-// ensure pdf folder exists (for local dev / for notificationService attachments)
-const PDF_DIR = path.join(__dirname, "../../pdfs");
-fs.mkdirSync(PDF_DIR, { recursive: true });
-
-/* -------------------- Cloudflare R2 Setup -------------------- */
+// R2 config
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
 const R2_BUCKET = process.env.R2_BUCKET;
 const R2_ENDPOINT = process.env.R2_ENDPOINT || (R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : undefined);
 const R2_REGION = process.env.R2_REGION || "auto";
 
 if (!process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY || !R2_BUCKET || !R2_ENDPOINT) {
-  console.warn("Cloudflare R2 not fully configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET and R2_ACCOUNT_ID / R2_ENDPOINT when deploying.");
+  console.warn("Cloudflare R2 not fully configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET and R2_ENDPOINT when deploying.");
 }
 
 const s3Client = new S3Client({
@@ -51,65 +44,54 @@ async function uploadPdfBufferToR2(buffer, key) {
     Key: key,
     Body: buffer,
     ContentType: "application/pdf",
+    // You can add ACL or metadata if needed
   });
   await s3Client.send(cmd);
-
-  // publicUrl pattern — works only if bucket / routing is configured public in Cloudflare
+  // publicUrl pattern — may not be public; we still return it
   const publicUrl = `${R2_ENDPOINT}/${R2_BUCKET}/${encodeURIComponent(key)}`;
   return { key, publicUrl };
 }
 
 // Get signed URL for private access
 async function getSignedUrlForKey(key, expiresInSeconds = 60 * 60) {
-  const getCmd = new GetObjectCommand({
-    Bucket: R2_BUCKET,
-    Key: key,
-  });
+  if (!key) throw new Error("R2 key is required for signed url");
+  const getCmd = new GetObjectCommand({ Bucket: R2_BUCKET, Key: key });
   const url = await getSignedUrl(s3Client, getCmd, { expiresIn: expiresInSeconds });
   return url;
 }
 
-/* ---------------- Helper: generate PDF Buffer and (1) write to disk (local) and (2) upload to R2 ----------------
-   Returns: { filePath, r2: { key, publicUrl } }
-   - We still write to disk so existing notificationService (which expects a file path) works unchanged.
-   - We upload to R2 and save pdfKey/pdfUrl on the bill record where used.
+/* Generate PDF buffer and upload directly to R2.
+   Returns: { key, publicUrl, signedUrl }
 */
-async function writeBillPdfToDiskAndUpload(bill) {
+async function generateAndUploadPdfToR2(bill) {
   if (!bill) throw new Error("Bill object is required to generate PDF");
 
-  // Generate Buffer using your unified generator
   const buffer = await generateBillPdfBuffer(bill);
   if (!Buffer.isBuffer(buffer) && !(buffer instanceof Uint8Array)) {
     throw new Error("PDF generator did not return a Buffer or Uint8Array");
   }
   const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
 
-  // Ensure local dir exists
-  if (!fs.existsSync(PDF_DIR)) fs.mkdirSync(PDF_DIR, { recursive: true });
-
-  const filename = `bill_${bill._id}.pdf`;
-  const filePath = path.join(PDF_DIR, filename);
-
-  // Write local copy (overwrites existing)
-  fs.writeFileSync(filePath, buf);
-
-  let r2res = null;
-  try {
-    if (R2_BUCKET && R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY) {
-      const key = `bills/${filename}`;
-      r2res = await uploadPdfBufferToR2(buf, key);
-    } else {
-      console.warn("Skipping R2 upload - R2 not configured");
-    }
-  } catch (r2Err) {
-    console.error("Failed to upload PDF to R2:", r2Err);
-    // continue — we still have local file for notifications
+  if (!R2_BUCKET || !R2_ENDPOINT || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY) {
+    throw new Error("R2 not configured");
   }
 
-  return { filePath, r2: r2res };
+  const filename = `bill_${bill._id}.pdf`;
+  const key = `bills/${filename}`;
+
+  await uploadPdfBufferToR2(buf, key);
+
+  // signed URL for immediate use (5 minutes)
+  const signedUrl = await getSignedUrlForKey(key, 60 * 5);
+
+  // public url pattern (may or may not be publicly accessible)
+  const publicUrl = `${R2_ENDPOINT}/${R2_BUCKET}/${encodeURIComponent(key)}`;
+
+  return { key, publicUrl, signedUrl };
 }
 
-/* ---------------- CRUD ---------------- */
+/* -------------------- CRUD and PDF endpoints -------------------- */
+
 exports.getBills = async (req, res) => {
   try {
     const { tenant, room, month } = req.query;
@@ -145,7 +127,6 @@ exports.getBill = async (req, res) => {
   }
 };
 
-/* ---------------- Create ---------------- */
 exports.createBill = async (req, res) => {
   try {
     const { tenant, room, billingMonth, charges = [], totalAmount, totals = {}, notes, paymentLink } = req.body;
@@ -185,33 +166,28 @@ exports.createBill = async (req, res) => {
       .populate("room", "number")
       .populate("building", "name address");
 
-    // generate PDF async (don't fail creation if pdf fails)
+    // generate PDF and upload to R2 (do not fail creation if pdf/upload fails)
     try {
-      const { filePath, r2 } = await writeBillPdfToDiskAndUpload(populated);
+      const r2 = await generateAndUploadPdfToR2(populated);
       if (r2 && r2.key) {
         populated.pdfKey = r2.key;
-        populated.pdfUrl = r2.publicUrl; // may be usable if you've configured public access; otherwise use signed URLs
-      } else {
-        // fall back to local-accessible path (for local dev)
-        populated.pdfUrl = `/pdfs/${path.basename(filePath)}`;
+        // store publicUrl for convenience (frontend won't use it for private access)
+        populated.pdfUrl = r2.publicUrl;
+        await populated.save();
       }
-      await populated.save();
     } catch (pdfErr) {
-      console.error("PDF generation failed during createBill:", pdfErr);
+      console.error("PDF generation/upload failed during createBill:", pdfErr);
     }
 
-    // notifications (do not fail creation if notifications fail)
-    // NOTE: Keep notification code commented/enabled as before - this still expects a local file path.
-    // If you want notifications to use the R2 public/signed url instead of local file, adapt notificationService accordingly.
-    /*
+    // notifications: always send if configured (best-effort)
     try {
-      const pdfPath = path.join(PDF_DIR, `bill_${populated._id}.pdf`);
-      if (populated.tenant?.email) await notificationService.sendBillEmail(populated, pdfPath);
-      if (populated.tenant?.phone) await notificationService.sendBillWhatsApp(populated, pdfPath);
+      const subject = templates.emailSubject(populated);
+      const emailHtml = templates.emailHtml(populated);
+      if (populated.tenant?.email) await notificationService.sendBillEmail(populated, null, subject, emailHtml);
+      if (populated.tenant?.phone) await notificationService.sendBillWhatsApp(populated, null, templates.whatsappBody(populated));
     } catch (notifyErr) {
-      console.error("createBill notification error:", notifyErr);
+      console.warn("createBill notification error:", notifyErr);
     }
-    */
 
     res.status(201).json(populated);
   } catch (err) {
@@ -220,7 +196,6 @@ exports.createBill = async (req, res) => {
   }
 };
 
-/* ---------------- Update ---------------- */
 exports.updateBill = async (req, res) => {
   try {
     const billId = req.params.id;
@@ -258,14 +233,12 @@ exports.updateBill = async (req, res) => {
       .populate("room", "number")
       .populate("building", "name address");
 
-    // 1) Regenerate PDF (write local and upload to R2)
+    // Regenerate PDF and upload to R2
     try {
-      const { filePath, r2 } = await writeBillPdfToDiskAndUpload(bill);
+      const r2 = await generateAndUploadPdfToR2(bill);
       if (r2 && r2.key) {
         bill.pdfKey = r2.key;
         bill.pdfUrl = r2.publicUrl;
-      } else {
-        bill.pdfUrl = `/pdfs/${path.basename(filePath)}`;
       }
       await bill.save();
     } catch (pdfErr) {
@@ -291,13 +264,11 @@ exports.createPaymentOrderPublic = async (req, res) => {
     const bill = await Bill.findById(req.params.id);
     if (!bill) return res.status(404).json({ message: "Bill not found" });
 
-    // Prevent creating order when already paid
     const paidStatus = (bill.paymentStatus || bill.status || "").toString().toLowerCase();
     if (paidStatus === "paid") {
       return res.status(400).json({ message: "Bill already paid" });
     }
 
-    // createOrder is imported at top: const { createOrder } = require("../services/razorpayService");
     const order = await createOrder({
       amount: bill.totalAmount,
       currency: "INR",
@@ -309,7 +280,6 @@ exports.createPaymentOrderPublic = async (req, res) => {
       return res.status(503).json({ message: "Payment provider not configured" });
     }
 
-    // store order id on bill (so webhook/verify can find it)
     bill.razorpayOrderId = order.id || order.order_id || (order && order);
     await bill.save();
 
@@ -324,15 +294,6 @@ exports.createPaymentOrderPublic = async (req, res) => {
   }
 };
 
-/**
- * Public: mark bill as paid (no auth)
- * POST /api/bills/:id/mark-paid-public
- *
- * Expected body:
- *   { paymentRef?, paidAt?, method?, paymentId?, razorpay_payment_id? }
- *
- * This mirrors the admin markPaid flow but intentionally uses public endpoint name.
- */
 exports.markPaidPublic = async (req, res) => {
   try {
     const { id } = req.params;
@@ -345,12 +306,10 @@ exports.markPaidPublic = async (req, res) => {
 
     if (!bill) return res.status(404).json({ message: "Bill not found" });
 
-    // If already paid, return error (idempotency)
     if ((bill.paymentStatus || "").toString().toLowerCase() === "paid") {
       return res.status(400).json({ message: "Bill already marked as paid" });
     }
 
-    // Update payment info
     bill.paymentStatus = "Paid";
     bill.payment = {
       status: "Paid",
@@ -361,7 +320,6 @@ exports.markPaidPublic = async (req, res) => {
     if (paymentId) bill.razorpayPaymentId = paymentId;
     if (req.body.razorpay_payment_id) bill.razorpayPaymentId = req.body.razorpay_payment_id;
 
-    // also update top-level fields for compatibility
     bill.razorpayOrderId = bill.razorpayOrderId || req.body.orderId || bill.razorpayOrderId;
 
     await bill.save();
@@ -396,19 +354,15 @@ exports.markPaidPublic = async (req, res) => {
       console.error("markPaidPublic: failed to record payment on tenant:", tErr);
     }
 
-    // Regenerate PDF and send immediate paid notifications (best-effort)
+    // Regenerate PDF, upload to R2 and send notifications
     try {
-      const { filePath, r2 } = await writeBillPdfToDiskAndUpload(bill);
-
+      const r2 = await generateAndUploadPdfToR2(bill);
       if (r2 && r2.key) {
         bill.pdfKey = r2.key;
         bill.pdfUrl = r2.publicUrl;
-      } else {
-        bill.pdfUrl = `/pdfs/${path.basename(filePath)}`;
       }
       await bill.save();
 
-      // try to remove any pending queued emails for this bill (if implemented)
       try {
         if (notificationService && typeof notificationService._removePendingEmailsForBill === "function") {
           notificationService._removePendingEmailsForBill(bill._id);
@@ -417,15 +371,13 @@ exports.markPaidPublic = async (req, res) => {
         console.warn("markPaidPublic: failed to remove pending emails:", remErr);
       }
 
-      // Use templates for subject/message
       const subject = templates.emailSubject(bill);
       const emailHtml = templates.emailHtml(bill);
       try {
         if (notificationService && typeof notificationService._sendBillEmailNow === "function") {
-          await notificationService._sendBillEmailNow(bill, filePath, subject, emailHtml);
+          await notificationService._sendBillEmailNow(bill, null, subject, emailHtml);
         } else if (notificationService && typeof notificationService.sendBillEmail === "function") {
-          // fallback to queued send
-          await notificationService.sendBillEmail(bill, filePath, subject, emailHtml);
+          await notificationService.sendBillEmail(bill, null, subject, emailHtml);
         }
       } catch (emailErr) {
         console.warn("markPaidPublic: failed to send paid-email:", emailErr);
@@ -435,7 +387,7 @@ exports.markPaidPublic = async (req, res) => {
       try {
         const whatsappMsg = templates.whatsappBody(bill);
         if (notificationService && typeof notificationService.sendBillWhatsApp === "function" && bill.tenant?.phone) {
-          await notificationService.sendBillWhatsApp(bill, filePath, whatsappMsg);
+          await notificationService.sendBillWhatsApp(bill, null, whatsappMsg);
         }
       } catch (waErr) {
         console.warn("markPaidPublic: failed to send WhatsApp:", waErr);
@@ -455,7 +407,6 @@ exports.markPaidPublic = async (req, res) => {
   }
 };
 
-/* ---------------- Delete ---------------- */
 exports.deleteBill = async (req, res) => {
   try {
     const bill = await Bill.findByIdAndDelete(req.params.id);
@@ -467,7 +418,6 @@ exports.deleteBill = async (req, res) => {
   }
 };
 
-/* ---------------- Generate PDF (explicit endpoint) ---------------- */
 exports.generateBillPdf = async (req, res) => {
   try {
     const billId = req.params.id;
@@ -478,20 +428,17 @@ exports.generateBillPdf = async (req, res) => {
 
     if (!bill) return res.status(404).json({ message: "Bill not found" });
 
-    const { filePath, r2 } = await writeBillPdfToDiskAndUpload(bill);
-
+    const r2 = await generateAndUploadPdfToR2(bill);
     if (r2 && r2.key) {
       bill.pdfKey = r2.key;
       bill.pdfUrl = r2.publicUrl;
-    } else {
-      bill.pdfUrl = `/pdfs/${path.basename(filePath)}`;
     }
     await bill.save();
 
     return res.status(200).json({
       success: true,
       pdfUrl: bill.pdfUrl,
-      message: "Bill PDF generated successfully",
+      message: "Bill PDF generated and uploaded successfully",
     });
   } catch (err) {
     console.error("generateBillPdf error:", err);
@@ -502,7 +449,6 @@ exports.generateBillPdf = async (req, res) => {
   }
 };
 
-/* ---------------- Download PDF (serves from R2 if available, else generates) ---------------- */
 exports.getBillPdf = async (req, res) => {
   try {
     const bill = await Bill.findById(req.params.id)
@@ -512,48 +458,41 @@ exports.getBillPdf = async (req, res) => {
 
     if (!bill) return res.status(404).json({ message: "Bill not found" });
 
-    // If R2 key exists, redirect to signed URL (preferred for production)
+    // If pdfKey exists, redirect to signed URL
     if (bill.pdfKey) {
       try {
         const url = await getSignedUrlForKey(bill.pdfKey, 60 * 5); // 5 minutes
         return res.redirect(url);
       } catch (err) {
-        console.warn("getBillPdf: failed to get signed url, falling back to generate/stream:", err);
-        // continue to generate PDF buffer and stream
+        console.warn("getBillPdf: failed to get signed url, falling back to regenerate:", err);
+        // fall through to regenerate
       }
     }
 
-    // Otherwise generate fresh PDF buffer and stream it
-    let pdfBuffer;
+    // No pdfKey - generate+upload then redirect
     try {
-      pdfBuffer = await generateBillPdfBuffer(bill);
+      const r2 = await generateAndUploadPdfToR2(bill);
+      if (r2 && r2.key) {
+        bill.pdfKey = r2.key;
+        bill.pdfUrl = r2.publicUrl;
+        await bill.save();
+        const url = await getSignedUrlForKey(r2.key, 60 * 5);
+        return res.redirect(url);
+      } else {
+        return res.status(500).json({ message: "Failed to upload PDF to storage" });
+      }
     } catch (genErr) {
       console.error("getBillPdf: PDF generation failed:", genErr);
       return res.status(500).json({ message: "Failed to generate PDF" });
     }
-
-    if (!Buffer.isBuffer(pdfBuffer)) {
-      console.error("getBillPdf: pdf generator did not return a Buffer");
-      return res.status(500).json({ message: "Failed to generate PDF" });
-    }
-
-    res.set({
-      "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename="bill_${bill._id}.pdf"`,
-      "Content-Length": pdfBuffer.length,
-      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-      Pragma: "no-cache",
-      Expires: "0",
-    });
-
-    return res.send(pdfBuffer);
   } catch (err) {
     console.error("getBillPdf error:", err);
     return res.status(500).json({ message: "Failed to generate PDF" });
   }
 };
 
-/* ---------------- Payments ---------------- */
+/* Payments & markPaid handlers are kept mostly same but upload PDF after marking paid (see markPaid below) */
+
 exports.createPaymentOrderForBill = async (req, res) => {
   try {
     const bill = await Bill.findById(req.params.id);
@@ -596,7 +535,6 @@ exports.markPaid = async (req, res) => {
       return res.status(400).json({ message: "Bill is already marked as Paid" });
     }
 
-    // ✅ Update payment info
     bill.paymentStatus = "Paid";
     bill.payment = {
       status: "Paid",
@@ -610,7 +548,7 @@ exports.markPaid = async (req, res) => {
 
     await bill.save();
 
-    // ✅ Record payment on tenant
+    // Record payment on tenant
     try {
       const tenant = await Tenant.findById(bill.tenant._id  || bill.tenant.tenantId || bill.tenant );
       if (tenant) {
@@ -644,14 +582,12 @@ exports.markPaid = async (req, res) => {
       console.error("Failed to record payment on tenant:", tErr);
     }
 
-    // ✅ Regenerate PDF, upload to R2 and send notifications
+    // Regenerate PDF, upload to R2 and send notifications
     try {
-      const { filePath, r2 } = await writeBillPdfToDiskAndUpload(bill);
+      const r2 = await generateAndUploadPdfToR2(bill);
       if (r2 && r2.key) {
         bill.pdfKey = r2.key;
         bill.pdfUrl = r2.publicUrl;
-      } else {
-        bill.pdfUrl = `/pdfs/${path.basename(filePath)}`;
       }
       await bill.save();
 
@@ -668,9 +604,9 @@ exports.markPaid = async (req, res) => {
       const emailHtml = templates.emailHtml(bill);
       try {
         if (notificationService && typeof notificationService._sendBillEmailNow === "function") {
-          await notificationService._sendBillEmailNow(bill, filePath, subject, emailHtml);
+          await notificationService._sendBillEmailNow(bill, null, subject, emailHtml);
         } else if (notificationService && typeof notificationService.sendBillEmail === "function") {
-          await notificationService.sendBillEmail(bill, filePath, subject, emailHtml);
+          await notificationService.sendBillEmail(bill, null, subject, emailHtml);
         }
       } catch (emailErr) {
         console.warn("[EMAIL] Failed to send immediate paid-email for bill:", emailErr);
@@ -680,7 +616,7 @@ exports.markPaid = async (req, res) => {
       try {
         const whatsappMsg = templates.whatsappBody(bill);
         if (bill.tenant?.phone) {
-          await notificationService.sendBillWhatsApp(bill, filePath, whatsappMsg);
+          await notificationService.sendBillWhatsApp(bill, null, whatsappMsg);
         }
       } catch (waErr) {
         console.warn("[WHATSAPP] Failed to send whatsapp for paid bill:", waErr);
@@ -704,7 +640,6 @@ exports.markPaid = async (req, res) => {
   }
 };
 
-/* ---------------- Resend Notifications ---------------- */
 exports.resendBillNotifications = async (req, res) => {
   try {
     const bill = await Bill.findById(req.params.id)
@@ -714,17 +649,16 @@ exports.resendBillNotifications = async (req, res) => {
 
     if (!bill) return res.status(404).json({ message: "Bill not found" });
 
-    let filePath;
+    // Ensure PDF exists on R2 (generate/upload if missing)
     try {
-      const resObj = await writeBillPdfToDiskAndUpload(bill);
-      filePath = resObj.filePath;
-      if (resObj.r2 && resObj.r2.key) {
-        bill.pdfKey = resObj.r2.key;
-        bill.pdfUrl = resObj.r2.publicUrl;
-      } else {
-        bill.pdfUrl = `/pdfs/${path.basename(filePath)}`;
+      if (!bill.pdfKey) {
+        const r2 = await generateAndUploadPdfToR2(bill);
+        if (r2 && r2.key) {
+          bill.pdfKey = r2.key;
+          bill.pdfUrl = r2.publicUrl;
+          await bill.save();
+        }
       }
-      await bill.save();
     } catch (genErr) {
       console.error("resend: PDF generation error:", genErr);
     }
@@ -733,7 +667,7 @@ exports.resendBillNotifications = async (req, res) => {
     try {
       const subject = templates.emailSubject(bill);
       const emailHtml = templates.emailHtml(bill);
-      await notificationService.sendBillEmail(bill, filePath, subject, emailHtml);
+      await notificationService.sendBillEmail(bill, null, subject, emailHtml);
     } catch (err) {
       console.error("resend: sendBillEmail error:", err && err.message ? err.message : err);
     }
@@ -741,7 +675,7 @@ exports.resendBillNotifications = async (req, res) => {
     // Send via WhatsApp (use template)
     try {
       const whatsappMsg = templates.whatsappBody(bill);
-      await notificationService.sendBillWhatsApp(bill, filePath, whatsappMsg);
+      await notificationService.sendBillWhatsApp(bill, null, whatsappMsg);
     } catch (err) {
       console.error("resend: sendBillWhatsApp error:", err && err.message ? err.message : err);
     }
@@ -753,7 +687,6 @@ exports.resendBillNotifications = async (req, res) => {
   }
 };
 
-/* ---------------- Public lookup ---------------- */
 exports.getBillsPublic = async (req, res) => {
   try {
     const { tenantId, roomNumber, month } = req.query;

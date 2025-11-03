@@ -358,8 +358,8 @@ async function generateBillPdfBeforePaid(bill) {
 
       // === add a QR for the bill (links to frontend bill view) ===
       try {
-        const backendUrl = process.env.BACKEND_URL;
-        const billLink = `${backendUrl}/api/bills/${bill._id}/pdf`;
+        const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
+        const billLink = `${R2_PUBLIC_URL}/bills/bill_${bill._id}.pdf?v=${stamp}`;
         const qrSize = 70; // reduced size
         const qrBuf = await generateQrBuffer(billLink, qrSize).catch(() => null);
         if (qrBuf) {
@@ -468,8 +468,8 @@ async function generateBillPdfAfterPaid(bill) {
         paidY += 72;
       }
       try {
-        const backendUrl = process.env.BACKEND_URL;
-        const billLink = `${backendUrl}/api/bills/${bill._id}/pdf`;
+        const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
+        const billLink = `${R2_PUBLIC_URL}/bills/bill_${bill._id}.pdf?v=${stamp}`;
         const qrSize = 70; // reduced size
         const qrBuf = await generateQrBuffer(billLink, qrSize).catch(() => null);
         if (qrBuf) {

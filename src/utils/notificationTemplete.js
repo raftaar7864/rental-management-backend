@@ -1,189 +1,188 @@
 // backend/src/utils/notificationTemplete.js
-// Centralized templates for emails and WhatsApp messages used by notificationService.
-//
-// Exported helpers:
-//   emailSubject(bill, opts) -> string
-//   emailHtml(bill, opts) -> string (HTML)
-//   whatsappBody(bill, opts) -> string (plain text)
-//
-// opts may contain { downloadLink, paymentLink, stamp, extraMessage }
+// Same code design – just improved subjects + professional email body text
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Your Company";
-const COMPANY_LOGO = process.env.COMPANY_LOGO_URL || ""; // absolute URL if available
+const COMPANY_LOGO = process.env.COMPANY_LOGO_URL || "";
 const COMPANY_BANK = process.env.COMPANY_BANK_DETAILS || "";
 const COMPANY_GST = process.env.COMPANY_GST || "";
-const DEFAULT_FROM = process.env.FROM_EMAIL || process.env.SMTP_USER || "no-reply@example.com";
+const DEFAULT_FROM = process.env.FROM_EMAIL || "no-reply@example.com";
 
-function safe(fn, fallback = "-") {
-  try {
-    const v = fn();
-    return v == null ? fallback : v;
-  } catch {
-    return fallback;
-  }
-}
-
-function safeTenantId(bill) {
-  const t = bill && bill.tenant;
-  if (!t) return "N/A";
-  return t.tenantId || (t._id ? String(t._id) : "N/A");
-}
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL || ""; 
 
 function safeRoomNumber(bill) {
   return bill?.room?.number || "N/A";
 }
-
 function formattedMonth(bill) {
-  try {
-    if (!bill || !bill.billingMonth) return "-";
-    return new Date(bill.billingMonth).toLocaleDateString("en-US", { month: "long", year: "numeric" });
-  } catch {
-    return "-";
-  }
+  if (!bill?.billingMonth) return "-";
+  return new Date(bill.billingMonth).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric"
+  });
 }
-
 function formatCurrency(n) {
   const num = Number(n || 0);
-  try {
-    return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(num);
-  } catch {
-    return `₹${num.toFixed(2)}`;
-  }
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 2
+  }).format(num);
 }
 
 function defaultLinks(bill, stamp) {
-  const s = stamp || (bill && bill.updatedAt ? (new Date(bill.updatedAt)).getTime() : Date.now());
-  const backend = (process.env.BACKEND_URL || "http://localhost:5000").replace(/\/$/, "");
-  const frontend = (process.env.FRONTEND_URL || backend).replace(/\/$/, "");
+  const s = stamp || Date.now();
+  const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
+
   return {
-    downloadLink: `${backend}/api/bills/${bill._id}/pdf?v=${s}`,
-    paymentLink: bill.paymentLink && /^https?:\/\//i.test(bill.paymentLink) ? bill.paymentLink : `${frontend}/payment/public/${bill._id}?v=${s}`,
-    stamp: s,
+    downloadLink: `${R2_PUBLIC_URL}/bills/bill_${bill._id}.pdf?v=${s}`,
+    paymentLink: isPaid ? null :
+      `${process.env.FRONTEND_URL?.replace(/\/$/, "")}/payment/public/${bill._id}?v=${s}`,
+    stamp: s
   };
 }
 
-function emailSubject(bill, opts = {}) {
+// ✅ Updated subject logic
+function emailSubject(bill) {
   const month = formattedMonth(bill);
-  return opts.subject || `Rent Bill • ${month} • ${bill.building?.name || COMPANY_NAME} • Room ${safeRoomNumber(bill)}`;
+  const room = safeRoomNumber(bill);
+  const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
+  
+  return isPaid
+    ? `✅ Payment Confirmed • ${month} • Room ${room}`
+    : `📄 Your Monthly Rent Bill • ${month} • Room ${room}`;
 }
 
 function chargesHtml(bill) {
   if (!Array.isArray(bill.charges) || bill.charges.length === 0) return "";
-  const rows = bill.charges.map(c => `<tr>
-    <td style="padding:6px 8px;border-bottom:1px solid #eee;">${c.title || "Charge"}</td>
-    <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">${formatCurrency(c.amount)}</td>
-  </tr>`).join("");
   return `
-    <table width="100%" style="border-collapse:collapse;margin-top:6px;">
-      ${rows}
+    <table width="100%" style="border-collapse:collapse;margin-top:8px;background:#fafafa;">
+      ${bill.charges.map(c => `
+      <tr>
+        <td style="padding:8px;border-bottom:1px solid #eee;">${c.title || "Charge"}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${formatCurrency(c.amount)}</td>
+      </tr>`).join("")}
     </table>
   `;
 }
 
+// ✅ Updated with friendly & professional wording
 function emailHtml(bill, opts = {}) {
-  if (!bill) return "<p>Bill information not available</p>";
-  const { downloadLink, paymentLink, stamp } = opts.downloadLink ? { downloadLink: opts.downloadLink, paymentLink: opts.paymentLink, stamp: opts.stamp } : defaultLinks(bill, opts.stamp);
+  if (!bill) return "<p>Bill info missing</p>";
+
+  const { downloadLink, paymentLink } = opts.downloadLink
+    ? opts
+    : defaultLinks(bill, opts.stamp);
+
   const month = formattedMonth(bill);
-  const tenantId = safeTenantId(bill);
-  const roomNumber = safeRoomNumber(bill);
-  const isPaid = (bill.paymentStatus || bill.status || "").toString().toLowerCase() === "paid";
-  const paidInfo = isPaid
-    ? `<p style="margin:8px 0;"><strong>Status:</strong> <span style="color:green">PAID ✅</span></p>
-       <p style="margin:4px 0;"><strong>Reference:</strong> ${bill.payment?.reference || "N/A"}</p>
-       <p style="margin:4px 0;"><strong>Method:</strong> ${bill.payment?.method || "N/A"}</p>
-       <p style="margin:4px 0;"><strong>Paid At:</strong> ${bill.payment?.paidAt ? new Date(bill.payment.paidAt).toLocaleString() : "N/A"}</p>`
-    : `<p style="margin:8px 0;"><strong>Payment Status:</strong> <span style="color:#c00">Unpaid ❌</span></p>`;
+  const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
 
-  const payOnlineHtml = !isPaid ? `<p style="margin:12px 0;">
-    <a href="${paymentLink}" style="display:inline-block;background:#007bff;color:white;padding:10px 18px;border-radius:6px;text-decoration:none;">💳 Pay Now</a>
-  </p>` : "";
+  const introText = isPaid
+    ? `We are pleased to inform you that your rent payment has been successfully processed.`
+    : `This is your monthly rent bill. We kindly request timely payment to ensure uninterrupted services.`;
 
-  const logoHtml = COMPANY_LOGO ? `<img src="${COMPANY_LOGO}" alt="${COMPANY_NAME}" style="max-height:48px;display:block;margin-bottom:8px;">` : `<h2 style="margin:0 0 8px 0;">${COMPANY_NAME}</h2>`;
+  const footerNote = isPaid
+    ? `Thank you for your cooperation. We truly appreciate your timely payments.`
+    : `If you have already paid, kindly ignore this notice or reply with payment details.`
 
-  const bankHtml = COMPANY_BANK ? `<p style="margin:8px 0;"><strong>Bank details:</strong><br/>${COMPANY_BANK}</p>` : "";
-  const gstHtml = COMPANY_GST ? `<p style="margin:4px 0;"><strong>GST:</strong> ${COMPANY_GST}</p>` : "";
+  const paidInfo = isPaid ? `
+    <p style="color:green;font-weight:bold;margin:4px 0;">✅ PAYMENT RECEIVED</p>
+    <p style="margin:4px 0;"><strong>Ref:</strong> ${bill.payment?.reference || "N/A"}</p>
+    <p style="margin:4px 0;"><strong>Method:</strong> ${bill.payment?.method || "N/A"}</p>
+  ` : `
+    <p style="color:#c00;font-weight:bold;">❌ Payment Pending</p>
+  `;
 
-  const notesHtml = bill.notes ? `<p style="margin:8px 0;"><strong>Notes:</strong> ${bill.notes}</p>` : "";
+  const logoHtml = COMPANY_LOGO
+    ? `<img src="${COMPANY_LOGO}" style="max-height:50px;">`
+    : `<h2 style="margin:0;">${COMPANY_NAME}</h2>`;
 
-  const chargesTable = chargesHtml(bill);
+  const paymentButton = !isPaid && paymentLink ? `
+    <a href="${paymentLink}" target="_blank"
+      style="background:#28a745;color:#fff;text-decoration:none;
+      padding:12px 22px;border-radius:6px;font-weight:bold;
+      display:inline-block;margin-right:10px;">
+      💳 Pay Now
+    </a>` : "";
 
   return `
-  <div style="font-family: Arial, Helvetica, sans-serif; color:#111; line-height:1.4; max-width:680px; margin:0 auto; padding:18px;">
-    <div style="display:flex; align-items:center; gap:12px;">
-      <div style="flex:0 0 auto;">${logoHtml}</div>
-      <div style="flex:1;">
-        <div style="font-size:14px;color:#6b7280;">${COMPANY_NAME}</div>
-        <div style="font-weight:600;font-size:16px;">Invoice • ${month}</div>
-      </div>
-    </div>
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f3f5;padding:20px;font-family:Arial,sans-serif;">
+    <tr><td align="center">
 
-    <hr style="border:none;border-top:1px solid #eee;margin:12px 0;"/>
+      <table cellpadding="0" cellspacing="0" width="100%" 
+        style="max-width:600px;background:#ffffff;border-radius:10px;overflow:hidden;
+        box-shadow:0 4px 12px rgba(0,0,0,0.08);">
 
-    <p style="margin:6px 0;">Dear <strong>${bill.tenant?.fullName || "Tenant"}</strong>,</p>
-    <p style="margin:6px 0;">Your rent bill for <strong>${month}</strong> is ready.</p>
+        <tr>
+          <td style="background:#0d6efd;padding:18px;text-align:center;color:white;">
+            ${logoHtml}
+          </td>
+        </tr>
 
-    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;">
-      <div style="flex:1;min-width:200px;">
-        <p style="margin:6px 0;"><strong>Your ID:</strong> ${tenantId}</p>
-        <p style="margin:6px 0;"><strong>Room:</strong> ${roomNumber}</p>
-      </div>
-      <div style="flex:1;min-width:200px;">
-        <p style="margin:6px 0;"><strong>Total:</strong> ${formatCurrency(bill.totalAmount)}</p>
-        ${isPaid ? `<p style="margin:6px 0;color:green;font-weight:600;">PAID</p>` : ""}
-      </div>
-    </div>
+        <tr><td style="padding:24px;color:#222;font-size:15px;">
+          <h3 style="margin:0 0 12px;">Invoice • ${month}</h3>
 
-    ${chargesTable}
-    ${paidInfo}
-    ${payOnlineHtml}
+          <p><strong>${bill.tenant?.fullName || "Tenant"}</strong>,<br>${introText}</p>
 
-    <p style="margin:8px 0;">Download Bill: <a href="${downloadLink}">Download PDF</a></p>
+          <p>Your rent bill amount is <strong>${formatCurrency(bill.totalAmount)}</strong></p>
 
-    ${notesHtml}
+          ${paidInfo}
 
-    ${bankHtml}
-    ${gstHtml}
+          ${chargesHtml(bill)}
 
-    <hr style="border:none;border-top:1px solid #f0f0f0;margin:16px 0;"/>
+          <div style="margin:20px 0;text-align:center;">
+            ${paymentButton}
+            <a href="${downloadLink}" target="_blank"
+              style="background:#0d6efd;color:#fff;text-decoration:none;
+              padding:12px 22px;border-radius:6px;font-weight:bold;
+              display:inline-block;">
+              📄 Download Bill
+            </a>
+          </div>
 
-    <p style="color:#6b7280;font-size:13px;margin:6px 0;">This is an automated message from ${COMPANY_NAME}. For support, reply to ${DEFAULT_FROM}.</p>
-  </div>
+          ${COMPANY_BANK ? `<p><strong>Bank Details:</strong><br>${COMPANY_BANK}</p>` : ""}
+          ${COMPANY_GST ? `<p><strong>GST:</strong> ${COMPANY_GST}</p>` : ""}
+
+          <p style="font-size:12px;color:#666;margin-top:20px;">${footerNote}<br>
+            For any help, reply to <a href="mailto:${DEFAULT_FROM}">${DEFAULT_FROM}</a>
+          </p>
+
+        </td></tr>
+
+        <tr>
+          <td style="background:#0d6efd;padding:12px;text-align:center;font-size:12px;color:#fff;">
+            © ${new Date().getFullYear()} ${COMPANY_NAME}
+          </td>
+        </tr>
+      </table>
+
+    </td></tr>
+  </table>
   `;
 }
 
+// ✅ WhatsApp message improvements
 function whatsappBody(bill, opts = {}) {
-  if (!bill) return "Bill information not available";
-  const { downloadLink, paymentLink, stamp } = opts.downloadLink ? { downloadLink: opts.downloadLink, paymentLink: opts.paymentLink, stamp: opts.stamp } : defaultLinks(bill, opts.stamp);
+  if (!bill) return "Bill info missing";
+
+  const { downloadLink, paymentLink } = defaultLinks(bill, opts.stamp);
   const month = formattedMonth(bill);
-  const tenantId = safeTenantId(bill);
-  const roomNumber = safeRoomNumber(bill);
-  const isPaid = (bill.paymentStatus || bill.status || "").toString().toLowerCase() === "paid";
+  const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
 
-  const paidLines = isPaid
-    ? `Payment Status: PAID ✅
-Reference: ${bill.payment?.reference || "N/A"}
-Method: ${bill.payment?.method || "N/A"}
-Paid At: ${bill.payment?.paidAt ? new Date(bill.payment.paidAt).toLocaleString() : "N/A"}`
-    : `Payment Status: Unpaid ❌
-Pay Online: ${paymentLink}`;
+  let msg = `🏡 *${COMPANY_NAME}*\n\n`;
+  msg += `📅 Month: *${month}*\n`;
+  msg += `🏠 Room: *${safeRoomNumber(bill)}*\n`;
+  msg += `💰 Amount: *${formatCurrency(bill.totalAmount)}*\n\n`;
 
-  const lines = [
-    `Dear ${bill.tenant?.fullName || "Tenant"},`,
-    `Your rent bill for ${month} is ${formatCurrency(bill.totalAmount)}.`,
-    ``,
-    `Your ID: ${tenantId}`,
-    `Room: ${roomNumber}`,
-    ``,
-    paidLines,
-    ``,
-    `Download Bill: ${downloadLink}`,
-    ``,
-    `Thank you!`,
-  ];
+  if (isPaid) {
+    msg += `✅ Payment Received. Thank you!\n\n`;
+  } else {
+    msg += `❌ Pending Payment\n`;
+    msg += `💳 Pay Here:\n${paymentLink}\n\n`;
+  }
 
-  if (opts.extraMessage) lines.push("", opts.extraMessage);
+  msg += `📄 Download Invoice:\n${downloadLink}\n\n`;
+  msg += `🙏 Thank you for your cooperation.`;
 
-  return lines.join("\n");
+  return msg;
 }
 
 module.exports = {

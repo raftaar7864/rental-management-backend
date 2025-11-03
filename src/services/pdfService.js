@@ -1,51 +1,20 @@
-// backend/src/services/pdfService.js
-/**
- * Centralized PDF service for bills.
- *
- * Public API:
- *   - generateBillPDF(billIdOrObject, opts = {}) -> Promise<string|Buffer>
- *       - if opts.forceWrite === true (default) -> returns absolute file path (string)
- *       - if opts.forceWrite === false -> returns Buffer (useful for streaming)
- *
- * opts:
- *   - mode: (kept for API compatibility but ignored) "auto"|"beforePaid"|"afterPaid"
- *   - forceWrite: boolean (default true)
- *
- * Behavior:
- *   - If billIdOrObject is a string -> loads Bill, populates tenant/room/building.
- *   - Uses ../utils/pdf.js generator to create the PDF Buffer (single unified generator).
- *   - Writes the buffer to backend/bills/bill_<id>.pdf when forceWrite === true.
- */
-
-const path = require("path");
-const fs = require("fs");
-const fsPromises = fs.promises;
+/**************************************************************************
+ * Unified PDF Service
+ * - Always uploads PDFs to Cloudflare R2 (no local storage)
+ * - Stores bill.pdfUrl with signed/public access reference
+ * - Returns the bill.pdfUrl every time
+ **************************************************************************/
 const Bill = require("../models/Bill");
-
-// unified generator
 const { generateBillPdf } = require("../utils/pdf");
-
-const BILLS_DIR = path.join(__dirname, "../../bills");
-
-async function ensureBillsDir() {
-  try {
-    if (!fs.existsSync(BILLS_DIR)) {
-      await fsPromises.mkdir(BILLS_DIR, { recursive: true });
-    }
-  } catch (err) {
-    throw new Error(`Failed to ensure bills directory (${BILLS_DIR}): ${err.message}`);
-  }
-}
+const savePdfToR2 = require("../utils/r2Upload"); // ✅ NEW helper
 
 async function loadAndPopulateBill(billId) {
-  if (!billId) throw new Error("billId is required");
   const doc = await Bill.findById(billId)
     .populate("tenant")
     .populate({
       path: "room",
       populate: { path: "building" },
     })
-    .populate("building")
     .lean({ virtuals: true });
 
   if (!doc) throw new Error(`Bill not found: ${billId}`);
@@ -53,57 +22,53 @@ async function loadAndPopulateBill(billId) {
 }
 
 /**
- * Generate PDF for a bill (by id or already-populated object).
- *
- * @param {string|object} billIdOrObject - Mongo bill _id or populated bill object
+ * generateBillPDF
+ * @param {string|object} billIdOrObject
  * @param {object} opts
- *    - mode: (ignored) "auto"|"beforePaid"|"afterPaid"    // kept for compatibility
- *    - forceWrite: boolean (default true). If false, returns Buffer.
+ *    - forceWrite: if false → returns buffer only (no upload)
  *
- * @returns {Promise<string|Buffer>} filePath (when forceWrite=true) or Buffer (when forceWrite=false)
+ * @returns {Promise<string|Buffer>}
  */
 async function generateBillPDF(billIdOrObject, opts = {}) {
   const { forceWrite = true } = opts;
 
-  if (!billIdOrObject) throw new Error("billIdOrObject is required");
+  if (!billIdOrObject) throw new Error("billIdOrObject missing!");
 
-  let billObj;
-  if (typeof billIdOrObject === "string" || typeof billIdOrObject === "number") {
-    billObj = await loadAndPopulateBill(String(billIdOrObject));
-  } else if (typeof billIdOrObject === "object") {
-    billObj = billIdOrObject;
-  } else {
-    throw new Error("Invalid billIdOrObject argument");
-  }
+  // Load bill details if only ID was provided
+  const bill =
+    typeof billIdOrObject === "string" || typeof billIdOrObject === "number"
+      ? await loadAndPopulateBill(String(billIdOrObject))
+      : billIdOrObject;
 
-  // Use unified generator
-  let pdfBuffer;
-  try {
-    pdfBuffer = await generateBillPdf(billObj);
-  } catch (err) {
-    throw new Error(`PDF generation failed for bill ${billObj._id || billObj.id || "unknown"}: ${err.message}`);
-  }
+  // ✅ Generate unified buffer PDF
+  const pdfBuffer = await generateBillPdf(bill);
 
   if (!Buffer.isBuffer(pdfBuffer)) {
-    throw new Error("PDF generator did not return a Buffer");
+    throw new Error("❌ PDF generator failed — no buffer returned");
   }
 
-  if (!forceWrite) {
-    return pdfBuffer;
+  // ForceWrite: upload to R2 + save URL into Bill
+  if (forceWrite) {
+    const filename = `bill-${bill._id}.pdf`;
+
+    // ✅ Upload to R2 (direct Cloudflare)
+    const pdfUrl = await savePdfToR2(filename, pdfBuffer);
+
+    if (!pdfUrl) throw new Error("❌ Failed uploading PDF to R2");
+
+    // ✅ Save into DB if needed
+    if (bill?._id) {
+      await Bill.findByIdAndUpdate(bill._id, { pdfUrl }, { new: true });
+    }
+
+    console.log(`✅ Bill PDF uploaded → ${pdfUrl}`);
+    return pdfUrl;
   }
 
-  try {
-    await ensureBillsDir();
-    const filename = `bill_${billObj._id || billObj.id}.pdf`;
-    const filePath = path.join(BILLS_DIR, filename);
-    await fsPromises.writeFile(filePath, pdfBuffer);
-    return filePath;
-  } catch (err) {
-    throw new Error(`Failed to write PDF for bill ${billObj._id || billObj.id}: ${err.message}`);
-  }
+  // No upload — return raw PDF (streaming cases)
+  return pdfBuffer;
 }
 
 module.exports = {
   generateBillPDF,
-  ensureBillsDir,
 };
