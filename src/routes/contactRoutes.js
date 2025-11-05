@@ -1,7 +1,15 @@
 // backend/src/routes/contactRoutes.js
 const express = require("express");
 const sgMail = require("@sendgrid/mail");
-const fetch = require("node-fetch"); // Only needed if Node < 18, safe to import anyway
+
+// Use node-fetch v2 (CommonJS)
+let fetch;
+try {
+  fetch = require("node-fetch");
+} catch (err) {
+  console.error("[contactRoutes] failed to require node-fetch. Did you install node-fetch@2?", err);
+  throw err;
+}
 
 const router = express.Router();
 
@@ -27,7 +35,12 @@ async function verifyRecaptcha(token, remoteIp) {
   const secret = process.env.RECAPTCHA_SECRET_KEY;
   if (!secret) {
     console.warn("[contactRoutes] RECAPTCHA_SECRET_KEY not set - skipping verification (NOT safe for production)");
-    return { success: true };
+    return { success: true, debug: "no-secret" };
+  }
+
+  if (!token) {
+    console.warn("[contactRoutes] verifyRecaptcha called with empty token");
+    return { success: false, "error-codes": ["invalid-input-response"], debug: "no-token" };
   }
 
   try {
@@ -36,12 +49,22 @@ async function verifyRecaptcha(token, remoteIp) {
     params.append("response", token);
     if (remoteIp) params.append("remoteip", remoteIp);
 
+    console.log("[contactRoutes] verifying recaptcha token length:", token.length);
     const response = await fetch("https://www.google.com/recaptcha/api/siteverify", {
       method: "POST",
       body: params,
+      // node-fetch v2 automatically sets appropriate headers for URLSearchParams
     });
 
+    // Guard: non-200 responses
+    if (!response || !response.ok) {
+      const text = await (response ? response.text() : Promise.resolve("no-response"));
+      console.error("[contactRoutes] non-ok response from google siteverify:", response && response.status, text);
+      return { success: false, "error-codes": ["bad-request"], debug: "non-ok-siteverify", status: response && response.status, body: text };
+    }
+
     const data = await response.json();
+    console.log("[contactRoutes] google recaptcha response:", data);
     return data;
   } catch (err) {
     console.error("[contactRoutes] reCAPTCHA verify error:", err);
@@ -61,12 +84,20 @@ router.post("/", async (req, res) => {
     }
 
     // --- Verify reCAPTCHA before sending ---
-    const ip = req.ip || req.headers["x-forwarded-for"] || null;
+    // Prefer X-Forwarded-For if you're behind a proxy; otherwise use req.ip
+    const ipHeader = req.headers["x-forwarded-for"];
+    const ip = (ipHeader && ipHeader.split(",").shift().trim()) || req.ip || null;
+
     const verification = await verifyRecaptcha(recaptchaToken, ip);
 
     if (!verification?.success) {
       console.error("[contactRoutes] reCAPTCHA verification failed:", verification);
-      return res.status(403).json({ message: "reCAPTCHA verification failed. Please try again." });
+      // TEMPORARY: include verification details in response to help debug on client.
+      // Remove this detail in production to avoid leaking info.
+      return res.status(403).json({
+        message: "reCAPTCHA verification failed. Please try again.",
+        verification,
+      });
     }
 
     // Optional: if using reCAPTCHA v3, you can check score threshold
