@@ -1,5 +1,5 @@
 // backend/src/utils/notificationTemplete.js
-// Same code design – just improved subjects + professional email body text
+// Improved subjects + professional email body text with distinct headings for Created / Updated / Paid
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Your Company";
 const COMPANY_LOGO = process.env.COMPANY_LOGO_URL || "";
@@ -7,7 +7,7 @@ const COMPANY_BANK = process.env.COMPANY_BANK_DETAILS || "";
 const COMPANY_GST = process.env.COMPANY_GST || "";
 const DEFAULT_FROM = process.env.FROM_EMAIL || "no-reply@example.com";
 
-const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL || ""; 
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL || "";
 
 function safeRoomNumber(bill) {
   return bill?.room?.number || "N/A";
@@ -16,16 +16,20 @@ function formattedMonth(bill) {
   if (!bill?.billingMonth) return "-";
   return new Date(bill.billingMonth).toLocaleDateString("en-US", {
     month: "long",
-    year: "numeric"
+    year: "numeric",
   });
 }
 function formatCurrency(n) {
   const num = Number(n || 0);
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2
-  }).format(num);
+  try {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+      maximumFractionDigits: 2,
+    }).format(num);
+  } catch {
+    return `₹${num.toFixed(2)}`;
+  }
 }
 
 function defaultLinks(bill, stamp) {
@@ -34,74 +38,100 @@ function defaultLinks(bill, stamp) {
 
   return {
     downloadLink: `${R2_PUBLIC_URL}/bills/bill_${bill._id}.pdf?v=${s}`,
-    paymentLink: isPaid ? null :
-      `${process.env.FRONTEND_URL?.replace(/\/$/, "")}/payment/public/${bill._id}?v=${s}`,
-    stamp: s
+    paymentLink: isPaid
+      ? null
+      : `${process.env.FRONTEND_URL?.replace(/\/$/, "")}/payment/public/${bill._id}?v=${s}`,
+    stamp: s,
   };
 }
 
-// ✅ Updated subject logic
-function emailSubject(bill) {
+/* ---------------- Subject helpers (distinct headings) ---------------- */
+function subjectForType(bill, type) {
   const month = formattedMonth(bill);
   const room = safeRoomNumber(bill);
-  const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
-  
-  return isPaid
-    ? `✅ Payment Confirmed • ${month} • Room ${room}`
-    : `📄 Your Monthly Rent Bill • ${month} • Room ${room}`;
+  if (type === "created") return `🆕 New Bill Generated • ${month} • Room ${room}`;
+  if (type === "updated") return `✏️ Bill Updated • ${month} • Room ${room}`;
+  // paid (default)
+  return `✅ Payment Confirmed • ${month} • Room ${room}`;
 }
 
+// backwards-compatible emailSubject: optionally pass opts.type
+function emailSubject(bill, opts = {}) {
+  const type = opts.type || ((bill && (bill.paymentStatus || bill.status || "").toLowerCase() === "paid") ? "paid" : "created");
+  return subjectForType(bill, type);
+}
+
+/* ---------------- Charges table ---------------- */
 function chargesHtml(bill) {
   if (!Array.isArray(bill.charges) || bill.charges.length === 0) return "";
   return `
     <table width="100%" style="border-collapse:collapse;margin-top:8px;background:#fafafa;">
-      ${bill.charges.map(c => `
+      ${bill.charges
+        .map(
+          (c) => `
       <tr>
         <td style="padding:8px;border-bottom:1px solid #eee;">${c.title || "Charge"}</td>
         <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${formatCurrency(c.amount)}</td>
-      </tr>`).join("")}
+      </tr>`
+        )
+        .join("")}
     </table>
   `;
 }
 
-// ✅ Updated with friendly & professional wording
+/* ---------------- Email body ----------------
+   opts:
+     - stamp: number
+     - type: "created" | "updated" | "paid"
+     - downloadLink/paymentLink may be provided explicitly
+*/
 function emailHtml(bill, opts = {}) {
   if (!bill) return "<p>Bill info missing</p>";
 
-  const { downloadLink, paymentLink } = opts.downloadLink
-    ? opts
-    : defaultLinks(bill, opts.stamp);
-
+  const { downloadLink, paymentLink, stamp } = opts.downloadLink ? opts : defaultLinks(bill, opts.stamp || opts.stamp);
+  const type = opts.type || ((bill && (bill.paymentStatus || bill.status || "").toLowerCase() === "paid") ? "paid" : "created");
   const month = formattedMonth(bill);
-  const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
+  const isPaid = type === "paid" || (bill && (bill.paymentStatus || bill.status || "").toLowerCase() === "paid");
 
-  const introText = isPaid
-    ? `We are pleased to inform you that your rent payment has been successfully processed.`
-    : `This is your monthly rent bill. We kindly request timely payment to ensure uninterrupted services.`;
+  // Heading text variations
+  let heading = "Invoice";
+  let introText = `This is your monthly rent bill. We kindly request timely payment to ensure uninterrupted services.`;
+  let footerNote = `If you have already paid, kindly ignore this notice or reply with payment details.`;
 
-  const footerNote = isPaid
-    ? `Thank you for your cooperation. We truly appreciate your timely payments.`
-    : `If you have already paid, kindly ignore this notice or reply with payment details.`
+  if (type === "created") {
+    heading = "New Invoice Generated";
+    introText = `A new rent invoice has been generated for you. Please review the details below.`;
+    footerNote = `If you have questions, reply to this email or contact support.`;
+  } else if (type === "updated") {
+    heading = "Invoice Updated";
+    introText = `Your rent invoice has been updated. Please review the updated details.`;
+    footerNote = `If you have already paid, please ignore or reply with payment details.`;
+  } else if (isPaid || type === "paid") {
+    heading = "Payment Confirmation";
+    introText = `We are pleased to inform you that your rent payment has been successfully processed.`;
+    footerNote = `Thank you for your cooperation. We truly appreciate your timely payment.`;
+  }
 
-  const paidInfo = isPaid ? `
+  const paidInfo = isPaid
+    ? `
     <p style="color:green;font-weight:bold;margin:4px 0;">✅ PAYMENT RECEIVED</p>
     <p style="margin:4px 0;"><strong>Ref:</strong> ${bill.payment?.reference || "N/A"}</p>
     <p style="margin:4px 0;"><strong>Method:</strong> ${bill.payment?.method || "N/A"}</p>
-  ` : `
-    <p style="color:#c00;font-weight:bold;">❌ Payment Pending</p>
-  `;
+  `
+    : `<p style="color:#c00;font-weight:bold;">❌ Payment Pending</p>`;
 
-  const logoHtml = COMPANY_LOGO
-    ? `<img src="${COMPANY_LOGO}" style="max-height:50px;">`
-    : `<h2 style="margin:0;">${COMPANY_NAME}</h2>`;
+  const logoHtml = COMPANY_LOGO ? `<img src="${COMPANY_LOGO}" style="max-height:50px;">` : `<h2 style="margin:0;">${COMPANY_NAME}</h2>`;
 
-  const paymentButton = !isPaid && paymentLink ? `
+  const paymentButton =
+    !isPaid && paymentLink
+      ? `
     <a href="${paymentLink}" target="_blank"
       style="background:#28a745;color:#fff;text-decoration:none;
       padding:12px 22px;border-radius:6px;font-weight:bold;
       display:inline-block;margin-right:10px;">
       💳 Pay Now
-    </a>` : "";
+    </a>`
+      : "";
 
   return `
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f3f5;padding:20px;font-family:Arial,sans-serif;">
@@ -118,7 +148,7 @@ function emailHtml(bill, opts = {}) {
         </tr>
 
         <tr><td style="padding:24px;color:#222;font-size:15px;">
-          <h3 style="margin:0 0 12px;">Invoice • ${month}</h3>
+          <h3 style="margin:0 0 12px;">${heading} • ${month}</h3>
 
           <p><strong>${bill.tenant?.fullName || "Tenant"}</strong>,<br>${introText}</p>
 
@@ -159,24 +189,33 @@ function emailHtml(bill, opts = {}) {
   `;
 }
 
-// ✅ WhatsApp message improvements
+/* ---------------- WhatsApp body (same pattern, different heading) ---------------- */
 function whatsappBody(bill, opts = {}) {
   if (!bill) return "Bill info missing";
 
-  const { downloadLink, paymentLink } = defaultLinks(bill, opts.stamp);
+  const { downloadLink, paymentLink } = opts.downloadLink ? opts : defaultLinks(bill, opts.stamp);
+  const type = opts.type || ((bill && (bill.paymentStatus || bill.status || "").toLowerCase() === "paid") ? "paid" : "created");
   const month = formattedMonth(bill);
-  const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
+  const isPaid = type === "paid" || (bill && (bill.paymentStatus || bill.status || "").toLowerCase() === "paid");
 
-  let msg = `🏡 *${COMPANY_NAME}*\n\n`;
-  msg += `📅 Month: *${month}*\n`;
-  msg += `🏠 Room: *${safeRoomNumber(bill)}*\n`;
-  msg += `💰 Amount: *${formatCurrency(bill.totalAmount)}*\n\n`;
+  let intro = "";
+  if (type === "created") intro = "generated.";
+  else if (type === "updated") intro = "updated.";
+  else intro = isPaid ? "paid successfully." : "📄 Invoice";
+
+  let msg = ``;
+  msg += `Dear ${bill.tenant?.fullName},\n`
+  msg += `Your monthly rental bill for *${month}* has been ${intro}.\n\n`
+  msg += `Your ID: *${bill.tenant?.tenantId}*\n`
+  msg += `Room: *${safeRoomNumber(bill)}*\n`;
+  msg += `Amount: *${formatCurrency(bill.totalAmount)}*\n\n`;
 
   if (isPaid) {
-    msg += `✅ Payment Received. Thank you!\n\n`;
+    msg += `✅ Payment Received\n\n`;
+    msg += `Ref: ${bill.payment?.reference || "N/A"}\n`;
   } else {
     msg += `❌ Pending Payment\n`;
-    msg += `💳 Pay Here:\n${paymentLink}\n\n`;
+    if (paymentLink) msg += `💳 Pay Here:\n${paymentLink}\n\n`;
   }
 
   msg += `📄 Download Invoice:\n${downloadLink}\n\n`;
@@ -185,8 +224,37 @@ function whatsappBody(bill, opts = {}) {
   return msg;
 }
 
+/* ---------------- Convenience shaped objects (optional) ---------------- */
+function billCreated(bill, stamp) {
+  const s = stamp || Date.now();
+  return {
+    subject: subjectForType(bill, "created"),
+    body: emailHtml(bill, { stamp: s, type: "created" }),
+  };
+}
+function billUpdated(bill, stamp) {
+  const s = stamp || Date.now();
+  return {
+    subject: subjectForType(bill, "updated"),
+    body: emailHtml(bill, { stamp: s, type: "updated" }),
+  };
+}
+function billPaid(bill, stamp) {
+  const s = stamp || Date.now();
+  return {
+    subject: subjectForType(bill, "paid"),
+    body: emailHtml(bill, { stamp: s, type: "paid" }),
+  };
+}
+
 module.exports = {
-  emailSubject,
-  emailHtml,
-  whatsappBody,
+  // main helpers used by controllers
+  emailSubject, // (bill, opts?)
+  emailHtml, // (bill, opts?)
+  whatsappBody, // (bill, opts?)
+
+  // convenience shaped objects if needed
+  billCreated,
+  billUpdated,
+  billPaid,
 };

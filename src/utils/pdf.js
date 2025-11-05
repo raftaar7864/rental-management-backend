@@ -52,6 +52,20 @@ function formatDateISO(d) {
   return dt.toISOString().split("T")[0];
 }
 
+// ---------------- safe stamp helper ----------------
+function getStampFromBill(bill) {
+  try {
+    if (bill && (bill.createdAt || bill.createdAt === 0)) {
+      const d = new Date(bill.createdAt);
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
+    }
+  } catch (e) {
+    // ignore and fallback
+  }
+  return new Date().toISOString();
+}
+
+
 async function generateQrBuffer(text, size = 150) {
   if (!QRCode || !text) return null;
   try {
@@ -343,6 +357,7 @@ async function generateBillPdfBeforePaid(bill) {
   return new Promise(async (resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: "A4", margin: 40, autoFirstPage: false, bufferPages: true });
+      const stamp = getStampFromBill(bill);
 
       const buffers = [];
       doc.on("data", buffers.push.bind(buffers));
@@ -443,6 +458,7 @@ async function generateBillPdfAfterPaid(bill) {
   return new Promise(async (resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: "A4", margin: 40, autoFirstPage: false });
+      const stamp = getStampFromBill(bill);
       const buffers = [];
       doc.on("data", buffers.push.bind(buffers));
       doc.on("end", () => resolve(Buffer.concat(buffers)));

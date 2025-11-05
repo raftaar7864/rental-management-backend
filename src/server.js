@@ -47,6 +47,7 @@ const paymentRoutes = require('./routes/paymentRoutes');
 const managerRoutes = require('./routes/managerRoutes');
 const managerTenantRoutes = require('./routes/managerTenantRoutes');
 const billRoutes = require('./routes/billRoutes');
+const contactRoutes= require (`./routes/contactRoutes`);
 
 // Mount routers
 app.use('/api/auth', authRoutes);
@@ -57,6 +58,7 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/manager', managerRoutes);
 app.use('/api/manager/tenants', managerTenantRoutes);
 app.use('/api/bills', billRoutes);
+app.use("/api/contact", contactRoutes);
 
 // -------------------- Payment Webhook --------------------
 // Note: we capture raw body via express.json({ verify }) above as req.rawBody.

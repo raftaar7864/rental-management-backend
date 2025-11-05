@@ -131,6 +131,9 @@ exports.createBill = async (req, res) => {
   try {
     const { tenant, room, billingMonth, charges = [], totalAmount, totals = {}, notes, paymentLink } = req.body;
 
+    // Respect explicit sendNotifications flag (default true)
+    const shouldSendNotifications = typeof req.body.sendNotifications === "boolean" ? req.body.sendNotifications : true;
+
     if (!tenant || !room || !billingMonth || typeof totalAmount === "undefined") {
       return res.status(400).json({ message: "tenant, room, billingMonth and totalAmount are required" });
     }
@@ -167,26 +170,65 @@ exports.createBill = async (req, res) => {
       .populate("building", "name address");
 
     // generate PDF and upload to R2 (do not fail creation if pdf/upload fails)
+    let r2Result = null;
     try {
-      const r2 = await generateAndUploadPdfToR2(populated);
-      if (r2 && r2.key) {
-        populated.pdfKey = r2.key;
-        // store publicUrl for convenience (frontend won't use it for private access)
-        populated.pdfUrl = r2.publicUrl;
+      r2Result = await generateAndUploadPdfToR2(populated);
+      if (r2Result && r2Result.key) {
+        populated.pdfKey = r2Result.key;
+        populated.pdfUrl = r2Result.publicUrl; // convenience public url (may or may not be public)
         await populated.save();
       }
     } catch (pdfErr) {
       console.error("PDF generation/upload failed during createBill:", pdfErr);
     }
 
-    // notifications: always send if configured (best-effort)
-    try {
-      const subject = templates.emailSubject(populated);
-      const emailHtml = templates.emailHtml(populated);
-      if (populated.tenant?.email) await notificationService.sendBillEmail(populated, null, subject, emailHtml);
-      if (populated.tenant?.phone) await notificationService.sendBillWhatsApp(populated, null, templates.whatsappBody(populated));
-    } catch (notifyErr) {
-      console.warn("createBill notification error:", notifyErr);
+    // Notifications — only if explicitly allowed by frontend
+    if (shouldSendNotifications) {
+      try {
+        const stamp = populated.createdAt ? new Date(populated.createdAt).getTime() : Date.now();
+        const subject = templates.emailSubject(populated);
+        const emailHtml = templates.emailHtml(populated, { stamp });
+        const whatsappMsg = templates.whatsappBody(populated, { stamp });
+
+        // Email
+        if (populated.tenant?.email) {
+          try {
+            if (notificationService && typeof notificationService._sendBillEmailNow === "function") {
+              await notificationService._sendBillEmailNow(populated, r2Result?.publicUrl || null, subject, emailHtml);
+              console.log(`[EMAIL] Immediate create-email sent for bill ${populated._id} to ${populated.tenant.email}`);
+            } else if (notificationService && typeof notificationService.sendBillEmail === "function") {
+              await notificationService.sendBillEmail(populated, r2Result?.publicUrl || null, subject, emailHtml);
+              console.log(`[EMAIL] Queued create-email for bill ${populated._id}`);
+            } else {
+              console.warn("[EMAIL] notificationService send function not available");
+            }
+          } catch (emailErr) {
+            console.warn("[EMAIL] createBill: failed to send email:", emailErr?.message || emailErr);
+          }
+        }
+
+        // WhatsApp
+        if (populated.tenant?.phone) {
+          try {
+            if (notificationService && typeof notificationService.sendBillWhatsApp === "function") {
+              await notificationService.sendBillWhatsApp(populated, r2Result?.publicUrl || null, whatsappMsg);
+              console.log(`[WHATSAPP] createBill: WhatsApp sent for bill ${populated._id} to ${populated.tenant.phone}`);
+            } else if (notificationService && typeof notificationService.sendWhatsApp === "function") {
+              // fallback
+              await notificationService.sendWhatsApp(populated, r2Result?.publicUrl || null, whatsappMsg);
+              console.log(`[WHATSAPP] createBill: WhatsApp sent (fallback) for bill ${populated._id}`);
+            } else {
+              console.warn("[WHATSAPP] notificationService whatsapp function not available");
+            }
+          } catch (waErr) {
+            console.warn("[WHATSAPP] createBill: failed to send WhatsApp:", waErr?.message || waErr);
+          }
+        }
+      } catch (notifyErr) {
+        console.warn("createBill: notification attempt failed:", notifyErr);
+      }
+    } else {
+      console.log(`Notifications skipped for bill ${populated._id} (sendNotifications=false)`);
     }
 
     res.status(201).json(populated);
@@ -196,10 +238,15 @@ exports.createBill = async (req, res) => {
   }
 };
 
+
+/* ---------------- Update ---------------- */
 exports.updateBill = async (req, res) => {
   try {
     const billId = req.params.id;
     const data = req.body;
+
+    // Respect explicit sendNotifications flag (default true)
+    const shouldSendNotifications = typeof data.sendNotifications === "boolean" ? data.sendNotifications : true;
 
     // Load and populate existing bill
     let bill = await Bill.findById(billId)
@@ -233,21 +280,93 @@ exports.updateBill = async (req, res) => {
       .populate("room", "number")
       .populate("building", "name address");
 
-    // Regenerate PDF and upload to R2
+    // Format month like "September, 2025" for message contexts (not strictly required)
+    const formattedMonth = bill.billingMonth ? new Date(bill.billingMonth).toLocaleDateString("en-US", {
+      month: "long",
+      year: "numeric",
+    }) : "-";
+
+    // 1) Try to upload regenerated PDF to R2 (preferred). Fallback to disk-write if needed.
+    let pdfPathOrUrl = null;
     try {
       const r2 = await generateAndUploadPdfToR2(bill);
       if (r2 && r2.key) {
         bill.pdfKey = r2.key;
         bill.pdfUrl = r2.publicUrl;
+        await bill.save();
+        pdfPathOrUrl = r2.publicUrl; // prefer public/signed url for sending
+        console.log(`updateBill: uploaded PDF to R2 for bill ${bill._id}`);
       }
-      await bill.save();
-    } catch (pdfErr) {
-      console.error("PDF generation failed during updateBill:", pdfErr);
+    } catch (r2Err) {
+      console.warn("updateBill: R2 upload failed, will try disk write:", r2Err?.message || r2Err);
+      try {
+        if (typeof writeBillPdfToDisk === "function") {
+          const diskPath = await writeBillPdfToDisk(bill);
+          bill.pdfUrl = `/pdfs/${path.basename(diskPath)}`;
+          await bill.save();
+          pdfPathOrUrl = diskPath;
+          console.log(`updateBill: wrote PDF to disk for bill ${bill._id}`);
+        }
+      } catch (diskErr) {
+        console.error("updateBill: disk PDF write also failed:", diskErr?.message || diskErr);
+      }
+    }
+
+    // 2) Send notifications if requested
+    if (shouldSendNotifications) {
+      try {
+        const stamp = bill.createdAt ? new Date(bill.createdAt).getTime() : Date.now();
+
+        const subject = templates.emailSubject(bill);
+        const emailHtml = templates.emailHtml(bill, { stamp });
+        const whatsappMsg = templates.whatsappBody(bill, { stamp });
+
+        const tenantEmail = bill.tenant?.email;
+        const tenantPhone = bill.tenant?.phone;
+
+        // EMAIL (prefer immediate)
+        if (tenantEmail) {
+          try {
+            if (notificationService && typeof notificationService._sendBillEmailNow === "function") {
+              await notificationService._sendBillEmailNow(bill, pdfPathOrUrl, subject, emailHtml);
+              console.log(`[EMAIL] Immediate update email sent for bill ${bill._id} to ${tenantEmail}`);
+            } else if (notificationService && typeof notificationService.sendBillEmail === "function") {
+              await notificationService.sendBillEmail(bill, pdfPathOrUrl, subject, emailHtml);
+              console.log(`[EMAIL] Queued update email for bill ${bill._id} to ${tenantEmail}`);
+            } else {
+              console.warn("[EMAIL] notificationService email function not available");
+            }
+          } catch (emailErr) {
+            console.warn(`[EMAIL] Failed to send update email for bill ${bill._id}:`, emailErr?.message || emailErr);
+          }
+        }
+
+        // WHATSAPP
+        if (tenantPhone) {
+          try {
+            if (notificationService && typeof notificationService.sendBillWhatsApp === "function") {
+              await notificationService.sendBillWhatsApp(bill, pdfPathOrUrl, whatsappMsg);
+              console.log(`[WHATSAPP] Update WhatsApp sent for bill ${bill._id} to ${tenantPhone}`);
+            } else if (notificationService && typeof notificationService.sendWhatsApp === "function") {
+              await notificationService.sendWhatsApp(bill, pdfPathOrUrl, whatsappMsg);
+              console.log(`[WHATSAPP] Update WhatsApp (fallback) sent for bill ${bill._id}`);
+            } else {
+              console.warn("[WHATSAPP] notificationService WhatsApp function not available");
+            }
+          } catch (waErr) {
+            console.warn(`[WHATSAPP] Failed to send update WhatsApp for bill ${bill._id}:`, waErr?.message || waErr);
+          }
+        }
+      } catch (notifyErr) {
+        console.warn("updateBill: notification attempt failed:", notifyErr);
+      }
+    } else {
+      console.log(`Notifications skipped for bill ${bill._id} (sendNotifications=false)`);
     }
 
     return res.status(200).json({
       success: true,
-      message: "Bill updated",
+      message: "Bill updated" + (shouldSendNotifications ? " and notifications attempted (if configured)" : " (notifications skipped)"),
       pdfUrl: bill.pdfUrl,
     });
   } catch (err) {
