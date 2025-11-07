@@ -211,10 +211,10 @@ function whatsappBody(bill, opts = {}) {
   msg += `Amount: *${formatCurrency(bill.totalAmount)}*\n\n`;
 
   if (isPaid) {
-    msg += `✅ Payment Received\n\n`;
+    msg += `Status: Paid ✅\n\n`;
     msg += `Ref: ${bill.payment?.reference || "N/A"}\n`;
   } else {
-    msg += `❌ Pending Payment\n`;
+    msg += `Status: Unpaid ❌\n`;
     if (paymentLink) msg += `💳 Pay Here:\n${paymentLink}\n\n`;
   }
 
