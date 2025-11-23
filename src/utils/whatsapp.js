@@ -14,7 +14,7 @@ async function sendWhatsApp(phone, text) {
   if (!phone || !client) return;
   try {
     const msg = await client.messages.create({
-      from: TWILIO_WHATSAPP_NUMBER,
+      from: TWILIO_WHATSAPP_FROM,
       to: `whatsapp:${phone}`,
       body: text,
     });
