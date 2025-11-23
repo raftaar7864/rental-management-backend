@@ -150,7 +150,7 @@ function emailHtml(bill, opts = {}) {
         <tr><td style="padding:24px;color:#222;font-size:15px;">
           <h3 style="margin:0 0 12px;">${heading} • ${month}</h3>
 
-          <p><strong>${bill.tenant?.fullName || "Tenant"}</strong>,<br>${introText}</p>
+          <p><strong>Dear ${bill.tenant?.fullName || "Tenant"}</strong>,<br>${introText}</p>
 
           <p>Your rent bill amount is <strong>${formatCurrency(bill.totalAmount)}</strong></p>
 
