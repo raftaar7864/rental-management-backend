@@ -125,7 +125,7 @@ function emailHtml(bill, opts = {}) {
   const paymentButton =
     !isPaid && paymentLink
       ? `
-    <a href="${paymentLink}" target="_blank"
+    <a href="" target="_blank"
       style="background:#28a745;color:#fff;text-decoration:none;
       padding:12px 22px;border-radius:6px;font-weight:bold;
       display:inline-block;margin-right:10px;">
@@ -215,7 +215,7 @@ function whatsappBody(bill, opts = {}) {
     msg += `Ref: ${bill.payment?.reference || "N/A"}\n`;
   } else {
     msg += `Status: Unpaid ❌\n`;
-    if (paymentLink) msg += `💳 Pay Here:\n${paymentLink}\n\n`;
+    if (paymentLink) msg += `💳 Pay Here:\n\n\n`;
   }
 
   msg += `📄 Download Invoice:\n${downloadLink}\n\n`;
