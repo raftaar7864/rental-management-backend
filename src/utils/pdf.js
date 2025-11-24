@@ -401,7 +401,7 @@ async function generateBillPdfBeforePaid(bill) {
 
       let paymentY = endY + 8;
       if (paymentLink) {
-        doc.font("Helvetica-Bold").fontSize(10).text("Pay Online:", leftX, paymentY);
+        doc.font("Helvetica-Bold").fontSize(10).text("Scan and Pay:", leftX, paymentY);
         doc.font("Helvetica").fontSize(10).fillColor("blue").text(paymentLink, leftX + 72, paymentY, {
           link: paymentLink,
           underline: true,
