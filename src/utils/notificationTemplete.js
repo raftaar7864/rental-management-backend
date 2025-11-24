@@ -219,7 +219,7 @@ function whatsappBody(bill, opts = {}) {
   }
 
   msg += `📄 Download Invoice:\n${downloadLink}\n\n`;
-  msg += `🙏 Thank you for your cooperation.`;
+  msg += `*© DB WELLNESS PVT LTD*`;
 
   return msg;
 }
