@@ -218,7 +218,7 @@ function whatsappBody(bill, opts = {}) {
     if (paymentLink) msg += `💳 Pay Here:\n\n\n`;
   }
 
-  msg += `📄 Download Invoice:\n${downloadLink}\n\n`;
+  msg += `📄 Download Invoice:\n${downloadLink}\n\n\n`;
   msg += `*© DB WELLNESS PVT LTD*`;
 
   return msg;
