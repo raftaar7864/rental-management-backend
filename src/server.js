@@ -8,7 +8,6 @@ const morgan = require('morgan');
 const app = express();
 
 // -------------------- Middleware --------------------
-// Allow CLIENT_ORIGIN or default to vite dev server
 const allowedOrigins = [
   'http://localhost:5173',
   'https://rentalmanagement.drbiswas.co.in',
@@ -17,7 +16,6 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (e.g., mobile apps, curl)
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -28,13 +26,17 @@ app.use(
   })
 );
 
-// Parse JSON but ALSO capture raw body buffer for webhook verification
-app.use(express.json({
-  verify: (req, res, buf) => {
-    // store raw body buffer for webhook handlers that need it
-    req.rawBody = buf;
-  }
-}));
+// ⚠️ Required for Twilio incoming WhatsApp webhooks
+app.use(express.urlencoded({ extended: false }));
+
+// Parse JSON + store raw body for payment webhook
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 
 app.use(morgan('dev'));
 
@@ -47,7 +49,10 @@ const paymentRoutes = require('./routes/paymentRoutes');
 const managerRoutes = require('./routes/managerRoutes');
 const managerTenantRoutes = require('./routes/managerTenantRoutes');
 const billRoutes = require('./routes/billRoutes');
-const contactRoutes= require (`./routes/contactRoutes`);
+const contactRoutes = require('./routes/contactRoutes');
+
+// ⭐ WhatsApp Incoming Route
+const whatsappIncoming = require('./routes/whatsappIncoming');
 
 // Mount routers
 app.use('/api/auth', authRoutes);
@@ -58,15 +63,14 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/manager', managerRoutes);
 app.use('/api/manager/tenants', managerTenantRoutes);
 app.use('/api/bills', billRoutes);
-app.use("/api/contact", contactRoutes);
+app.use('/api/contact', contactRoutes);
+
+// ⭐ WhatsApp Webhook endpoint
+app.use('/api/whatsapp', whatsappIncoming);
 
 // -------------------- Payment Webhook --------------------
-// Note: we capture raw body via express.json({ verify }) above as req.rawBody.
-// This keeps JSON parsing for normal routes and gives raw bytes for webhooks.
 app.post('/api/payments/webhook', (req, res) => {
   try {
-    // Ensure raw body exists
-    // If you need a string, do: req.rawBody.toString()
     req.rawBodyString = req.rawBody ? req.rawBody.toString() : null;
 
     const paymentController = require('./controllers/paymentController');
@@ -77,9 +81,8 @@ app.post('/api/payments/webhook', (req, res) => {
   }
 });
 
-// -------------------- Root Route / Health Check --------------------
+// -------------------- Health Check --------------------
 app.get('/', (req, res) => res.send('Rental Management Backend Running'));
-app.get('/api/rooms/test', (req, res) => res.json({ ok: true, message: '/api/rooms/test reached' }));
 
 // -------------------- Global Error Handler --------------------
 app.use((err, req, res, next) => {
@@ -90,7 +93,7 @@ app.use((err, req, res, next) => {
 // -------------------- MongoDB & Server Start --------------------
 const mongoUri = process.env.MONGO_URI;
 if (!mongoUri) {
-  console.error('ERROR: MONGO_URI is not set. Please update backend/.env');
+  console.error('ERROR: MONGO_URI is not set.');
   process.exit(1);
 }
 
@@ -99,27 +102,9 @@ mongoose
   .then(async () => {
     console.log('MongoDB connected');
 
-    // Print all registered routes for debugging
-    if (app._router && app._router.stack) {
-      console.log('--- Express registered routes ---');
-      app._router.stack.forEach((middleware) => {
-        if (middleware.route) {
-          console.log(middleware.route.path, Object.keys(middleware.route.methods));
-        } else if (middleware.name === 'router' && middleware.handle.stack) {
-          middleware.handle.stack.forEach((handler) => {
-            if (handler.route) console.log(handler.route.path, Object.keys(handler.route.methods));
-          });
-        }
-      });
-    }
-
-    // Start scheduler for monthly billing (jobs/generateMonthlyBills.js)
+    const { scheduleMonthlyBilling } = require('./jobs/generateMonthlyBills');
     try {
-      const { scheduleMonthlyBilling } = require('./jobs/generateMonthlyBills');
       scheduleMonthlyBilling();
-      // Optional: to run a manual generation for testing uncomment below:
-      // const { runOnceForMonth } = require('./jobs/generateMonthlyBills');
-      // runOnceForMonth(new Date().getFullYear(), new Date().getMonth() + 1).then(r => console.log('Manual billing run result:', r)).catch(console.error);
     } catch (err) {
       console.error('Failed to start billing scheduler:', err);
     }
@@ -132,11 +117,11 @@ mongoose
     process.exit(1);
   });
 
-// Optional: graceful shutdown
+// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('SIGINT received. Closing mongoose connection.');
   mongoose.connection.close(false, () => {
-    console.log('MongoDb connection closed. Exiting process.');
+    console.log('MongoDB connection closed. Exiting process.');
     process.exit(0);
   });
 });
