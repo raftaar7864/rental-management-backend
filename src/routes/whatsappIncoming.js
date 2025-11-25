@@ -10,14 +10,12 @@ router.post("/incoming", (req, res) => {
 
   let reply = null;
 
-  // If tenant sends "hi", "hii", "hello"
 if (["Hi","Hii", "hi", "hii", "hello", "hey"].includes(msg)) {
   reply =
-    "👋 *Welcome to Doctor Biswas Medicare Rent Services*\n\n" +
+    "👋 *Welcome to DB WELLNESS PVT LTD Rent Services*\n\n" +
     "Thank you for contacting us.\n\n" +
     "You will get your *monthly rental bill* and *payment receipt* here automatically every month.\n\n" +
-    "For more inquiry, visit our portal:\n" +
-    "https://rentalmanagement.drbiswas.co.in/\n\n";
+    "For more inquiry, Call this number +916291161002.\n";
 }
 
 
@@ -36,3 +34,4 @@ if (["Hi","Hii", "hi", "hii", "hello", "hey"].includes(msg)) {
 });
 
 module.exports = router;
+
