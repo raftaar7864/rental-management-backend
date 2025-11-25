@@ -15,7 +15,7 @@ if (["Hi","Hii", "hi", "hii", "hello", "hey"].includes(msg)) {
     "👋 *Welcome to DB WELLNESS PVT LTD Rent Services*\n\n" +
     "Thank you for contacting us.\n\n" +
     "You will get your *monthly rental bill* and *payment receipt* here automatically every month.\n\n" +
-    "For more inquiry, visit our portal or call this number +91 6291 161 002.\n";
+    "For more inquiry, visit our portal or call this number +91 6291161002.\n";
 }
 
 
@@ -34,6 +34,7 @@ if (["Hi","Hii", "hi", "hii", "hello", "hey"].includes(msg)) {
 });
 
 module.exports = router;
+
 
 
 
