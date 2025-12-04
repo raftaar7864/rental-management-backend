@@ -181,7 +181,7 @@ async function sendBillWhatsApp(bill) {
   }
 
   const { downloadLink, paymentLink, isPaid } = getBillLinks(bill);
-  const billStatus = isPaid ? "Status: Paid" : "Status: Not Paid";
+  const billStatus = isPaid ? "Status: Paid ✅" : "Status: Not Paid ❌";
   const actionText = getActionText(bill); 
   // ----------------------------------------
   const variables = {
