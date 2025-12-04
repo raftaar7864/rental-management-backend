@@ -176,7 +176,7 @@ function whatsappBody(bill) {
   const { downloadLink, paymentLink, isPaid } = defaultLinks(bill);
 
   // Determine bill status text
-  const billStatus = isPaid ? "Status: Paid" : "Status: Not Paid";
+  const billStatus = isPaid ? "Status: Paid ✅" : "Status: Not Paid ❌";
 
   // Determine action (Generated / Updated / Paid Successfully)
   let actionText = "Generated";
