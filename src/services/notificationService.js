@@ -1,32 +1,28 @@
 // backend/src/services/notificationService.js
 /**
  * Notification service
- * - Uses sendEmail(from ../utils/email) which should be your SendGrid helper
- * - WhatsApp via Twilio preferred, fallback to WhatsApp Cloud API
+ * - Email via sendEmail (../utils/email)
+ * - WhatsApp via Twilio Template (contentSid)
  * - Email queue with simple throttling
  *
  * Exports:
- *  - sendBill(bill, subject, message)
- *  - sendBillEmail(bill, pdfPath, subject, message) -> queued send
- *  - sendBillWhatsApp(bill, pdfPath, message) -> immediate
- *  - _sendBillEmailNow(bill, pdfPath, subject, message) -> immediate
+ *  - sendBill(bill, pdfPath, subject, message)
+ *  - sendBillEmail(bill, pdfPath, subject, message)
+ *  - sendBillWhatsApp(bill, pdfPath)
+ *  - _sendBillEmailNow(bill, pdfPath, subject, message)
  *  - _removePendingEmailsForBill(billId)
  *  - _config -> debug info
  */
 
-const axios = require("axios");
 const Twilio = require("twilio");
 const templates = require("../utils/notificationTemplete");
-const { sendEmail } = require("../utils/email"); // sendEmail(to, subject, text, html)
-const path = require("path");
-const fs = require("fs");
+const { sendEmail } = require("../utils/email");
 
 const {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_WHATSAPP_FROM,
-  WHATSAPP_CLOUD_API_TOKEN,
-  WHATSAPP_PHONE_ID,
+  TWILIO_TEMPLATE_SID,
   FRONTEND_URL,
   BACKEND_URL,
   DEFAULT_COUNTRY_PREFIX,
@@ -37,29 +33,23 @@ const frontendBase = (FRONTEND_URL || BACKEND_URL || "http://localhost:3000").tr
 
 // Twilio client if configured
 let twilioClient = null;
-const twilioConfigured = Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_WHATSAPP_FROM);
+const twilioConfigured = Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_WHATSAPP_FROM && TWILIO_TEMPLATE_SID);
 if (twilioConfigured) {
   try {
     twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
     console.log("[WHATSAPP] Twilio configured");
   } catch (err) {
-    console.warn("[WHATSAPP] Twilio init failed:", err && err.message ? err.message : err);
+    console.warn("[WHATSAPP] Twilio init failed:", err?.message || err);
     twilioClient = null;
   }
 } else {
-  console.log("[WHATSAPP] Twilio not configured");
+  console.log("[WHATSAPP] Twilio not fully configured");
 }
-
-const waCloudConfigured = Boolean(WHATSAPP_CLOUD_API_TOKEN && WHATSAPP_PHONE_ID);
-console.log(waCloudConfigured ? "[WHATSAPP] Cloud API configured" : "[WHATSAPP] Cloud API not configured");
 
 // ---------------- Email queue ----------------
 let emailQueue = [];
 let emailProcessing = false;
 
-/**
- * Normalize bill id (handles when queue item stored as bill object or billId)
- */
 function _normalizeBillId(b) {
   try {
     if (!b) return null;
@@ -72,9 +62,6 @@ function _normalizeBillId(b) {
   }
 }
 
-/**
- * Remove pending queued emails for a bill (used after payment)
- */
 function _removePendingEmailsForBill(billId) {
   try {
     const idStr = billId?.toString ? billId.toString() : String(billId);
@@ -84,13 +71,10 @@ function _removePendingEmailsForBill(billId) {
     });
     console.log(`[EMAIL] Removed pending queued emails for bill ${idStr}`);
   } catch (err) {
-    console.warn("[EMAIL] _removePendingEmailsForBill failed:", err && err.message ? err.message : err);
+    console.warn("[EMAIL] _removePendingEmailsForBill failed:", err?.message || err);
   }
 }
 
-/**
- * Queue processor - sends emails one-by-one with small throttle
- */
 async function processEmailQueue() {
   if (emailProcessing || emailQueue.length === 0) return;
   emailProcessing = true;
@@ -99,66 +83,40 @@ async function processEmailQueue() {
 
   try {
     await _sendBillEmailNow(bill, pdfPath, subject, message);
-    resolve && resolve();
+    resolve?.();
   } catch (err) {
-    reject && reject(err);
+    reject?.(err);
   }
 
   emailProcessing = false;
   if (emailQueue.length > 0) {
-    // throttle for a brief interval (adjustable)
     setTimeout(processEmailQueue, 400);
   }
 }
 
-/* ---------------- Helper: build links ----------------
-   Template already builds links using R2_PUBLIC_URL; this keeps same semantics.
-*/
-/* ---------------- Helper: build links ---------------- */
 function getBillLinks(bill) {
   const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL?.replace(/\/$/, "");
   const stamp = bill?.updatedAt ? new Date(bill.updatedAt).getTime() : Date.now();
-
-  // ✅ Always point to Cloudflare R2
   const downloadLink = `${R2_PUBLIC_URL}/bills/bill_${bill._id}.pdf?v=${stamp}`;
-
   const isPaid = (bill.paymentStatus || bill.status || "").toLowerCase() === "paid";
-  const paymentLink = isPaid
-    ? null
-    : `${frontendBase}/payment/public/${bill._id}?v=${stamp}`;
-
-  return { downloadLink, paymentLink, stamp };
+  const paymentLink = isPaid ? "" : `${frontendBase}/payment/public/${bill._id}?v=${stamp}`;
+  return { downloadLink, paymentLink, stamp, isPaid };
 }
 
-
-/* ---------------- Email: immediate send ----------------
-   - bill: populated bill object
-   - pdfPath: optional local path (we do not attach by default; prefer link)
-   - subject: override
-   - message: override HTML
-*/
+// ---------------- Email ----------------
 async function _sendBillEmailNow(bill, pdfPath = null, subject = null, message = null) {
-  // Use sendEmail util (SendGrid)
   if (typeof sendEmail !== "function") {
-    const msg = "sendEmail util not available";
-    console.warn("[EMAIL] " + msg);
-    throw new Error(msg);
+    throw new Error("sendEmail util not available");
   }
 
   const tenantEmail = bill?.tenant?.email;
-  if (!tenantEmail) {
-    console.warn(`[EMAIL] No tenant email for bill ${bill?._id}`);
-    return;
-  }
+  if (!tenantEmail) return console.warn(`[EMAIL] No tenant email for bill ${bill?._id}`);
 
-  // ensure links included for templates (stamp)
   const { downloadLink, paymentLink, stamp } = getBillLinks(bill);
 
   const finalSubject = subject || templates.emailSubject(bill, { downloadLink, paymentLink, stamp });
   const finalHtml = message || templates.emailHtml(bill, { downloadLink, paymentLink, stamp });
-
-  // Fallbacks to avoid SendGrid complaints
-  const safeHtml = (typeof finalHtml === "string" && finalHtml.length > 0) ? finalHtml : `<p>Please view your bill: <a href="${downloadLink}">Download PDF</a></p>`;
+  const safeHtml = finalHtml || `<p>Please view your bill: <a href="${downloadLink}">Download PDF</a></p>`;
   const safeText = `Your bill is available: ${downloadLink}` + (paymentLink ? `\nPay: ${paymentLink}` : "");
 
   try {
@@ -166,64 +124,51 @@ async function _sendBillEmailNow(bill, pdfPath = null, subject = null, message =
     await sendEmail(tenantEmail, finalSubject, safeText, safeHtml);
     console.log(`[EMAIL] Sent immediate email to ${tenantEmail}`);
   } catch (err) {
-    console.error("[EMAIL] Failed to send email:", err && (err.response?.body || err.message || err));
+    console.error("[EMAIL] Failed to send email:", err?.response?.body || err?.message || err);
     throw err;
   }
 }
 
-/**
- * Public queued send
- * returns a Promise that resolves when queued item is sent
- */
 function sendBillEmail(bill, pdfPath = null, subject = null, message = null) {
   return new Promise((resolve, reject) => {
     emailQueue.push({ bill, pdfPath, resolve, reject, subject, message });
-    // start processor if idle
     setImmediate(processEmailQueue);
   });
 }
 
-/* ---------------- WhatsApp ----------------
-   - Prefer Twilio (template text)
-   - Fallback to WhatsApp Cloud API
-*/
-async function sendWhatsAppViaTwilio({ toPhone, text }) {
-  if (!twilioClient) throw new Error("Twilio client not configured");
-  if (!TWILIO_WHATSAPP_FROM) throw new Error("TWILIO_WHATSAPP_FROM not set");
-
-  const from = `whatsapp:${TWILIO_WHATSAPP_FROM}`;
-  const to = toPhone.startsWith("whatsapp:") ? toPhone : `whatsapp:${toPhone}`;
-
-  const sent = await twilioClient.messages.create({
-    from,
-    to,
-    body: text,
+// ---------------- WhatsApp ----------------
+function formattedMonth(bill) {
+  if (!bill?.billingMonth) return "-";
+  return new Date(bill.billingMonth).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
   });
-
-  console.log(`[WHATSAPP][twilio] Sent to ${toPhone} (sid=${sent.sid || "n/a"})`);
-  return sent;
 }
 
-async function sendWhatsAppViaCloud({ toPhone, text }) {
-  if (!WHATSAPP_CLOUD_API_TOKEN || !WHATSAPP_PHONE_ID) throw new Error("WhatsApp Cloud API not configured");
-  const url = `https://graph.facebook.com/v17.0/${WHATSAPP_PHONE_ID}/messages`;
-  const payload = {
-    messaging_product: "whatsapp",
-    to: toPhone,
-    text: { body: text },
-  };
-  const res = await axios.post(url, payload, {
-    headers: { Authorization: `Bearer ${WHATSAPP_CLOUD_API_TOKEN}` },
-  });
-  console.log(`[WHATSAPP][cloud] Sent to ${toPhone} (status=${res.status})`);
-  return res.data;
+function safeRoomNumber(bill) {
+  return bill?.room?.number || "N/A";
 }
 
-/**
- * sendBillWhatsApp(bill, pdfPath, messageOverride)
- * - messageOverride expected plain-text (if provided)
- */
-async function sendBillWhatsApp(bill, pdfPath = null, messageOverride = null) {
+function getActionText(bill) {
+  const status = (bill.paymentStatus || bill.status || "").toLowerCase();
+  if (status === "paid") return "Paid Successfully";
+
+  // If bill has updatedAt > createdAt → updated
+  if (bill.createdAt && bill.updatedAt) {
+    if (new Date(bill.updatedAt).getTime() - new Date(bill.createdAt).getTime() > 2000) {
+      return "Updated";
+    }
+  }
+
+  return "Generated";
+}
+
+async function sendBillWhatsApp(bill) {
+  if (!twilioClient) {
+    console.warn("[WHATSAPP] Twilio client not configured");
+    return;
+  }
+
   const tenantPhoneRaw = bill?.tenant?.phone;
   if (!tenantPhoneRaw) {
     console.warn(`[WHATSAPP] Skipped for bill ${bill?._id}. Tenant phone missing`);
@@ -232,69 +177,69 @@ async function sendBillWhatsApp(bill, pdfPath = null, messageOverride = null) {
 
   let tenantPhone = tenantPhoneRaw.trim();
   if (!tenantPhone.startsWith("+")) {
-    const prefix = DEFAULT_COUNTRY_PREFIX || "+91";
-    tenantPhone = `${prefix}${tenantPhone}`;
+    tenantPhone = `${DEFAULT_COUNTRY_PREFIX || "+91"}${tenantPhone}`;
   }
 
-  // prepare links
-  const { downloadLink, paymentLink, stamp } = getBillLinks(bill);
-  const message = messageOverride || templates.whatsappBody(bill, { downloadLink, paymentLink, stamp });
+  const { downloadLink, paymentLink, isPaid } = getBillLinks(bill);
+  const billStatus = isPaid ? "Status: Paid" : "Status: Not Paid";
+  const actionText = getActionText(bill); 
+  // ----------------------------------------
+  const variables = {
+    "1": String(bill.tenant?.fullName || "-"),
+    "2": String(formattedMonth(bill) || "-"),
+    "3": String(actionText || "-"),
+    "4": String(bill.tenant?.tenantId || "-"),
+    "5": String(safeRoomNumber(bill) || "-"),
+    "6": String(bill.totalAmount ?? "-"),
+    "7": String(billStatus || "-"),
+    "8": String(isPaid ? "-" : paymentLink || "-"),
+    "9": String(downloadLink || "-")
+  };
 
-  // Try Twilio first
-  if (twilioClient) {
-    try {
-      return await sendWhatsAppViaTwilio({ toPhone: tenantPhone, text: message });
-    } catch (err) {
-      console.error("[WHATSAPP] Twilio send failed:", err && (err.message || err));
-      // fallthrough
-    }
+
+  const payload = {
+    from: `whatsapp:${TWILIO_WHATSAPP_FROM}`,
+    to: `whatsapp:${tenantPhone}`,
+    contentSid: process.env.TWILIO_TEMPLATE_SID,
+    contentVariables: JSON.stringify(variables)
+  };
+
+  try {
+    const res = await twilioClient.messages.create(payload);
+    console.log(`[WHATSAPP] Sent WhatsApp to ${tenantPhone} (SID: ${res.sid})`);
+    return res;
+  } catch (err) {
+    console.error("[WHATSAPP] Failed to send template:", err?.message || err);
+    throw err;
   }
-
-  // fallback to Cloud API
-  if (waCloudConfigured) {
-    try {
-      return await sendWhatsAppViaCloud({ toPhone: tenantPhone, text: message });
-    } catch (err) {
-      console.error("[WHATSAPP] Cloud send failed:", err && (err.message || err));
-      throw err;
-    }
-  }
-
-  console.warn("[WHATSAPP] No provider configured (Twilio/Cloud). Skipped sending.");
-  return;
 }
 
-/* ---------------- Combined helper ----------------
-   sendBill: queue email + fire whatsapp (best-effort)
-*/
+// ---------------- Combined helper ----------------
 async function sendBill(bill, pdfPath = null, subject = null, message = null) {
-  // queue email (non-blocking) and attempt whatsapp
   try {
-    sendBillEmail(bill, pdfPath, subject, message).catch((e) => {
-      console.warn("[EMAIL] queued send failed:", e && e.message ? e.message : e);
+    sendBillEmail(bill, pdfPath, subject, message).catch(e => {
+      console.warn("[EMAIL] queued send failed:", e?.message || e);
     });
   } catch (e) {
-    console.warn("[EMAIL] failed to queue email:", e && e.message ? e.message : e);
+    console.warn("[EMAIL] failed to queue email:", e?.message || e);
   }
 
   try {
-    await sendBillWhatsApp(bill, pdfPath, message);
+    await sendBillWhatsApp(bill, pdfPath);
   } catch (e) {
-    console.warn("[WHATSAPP] failed to send:", e && e.message ? e.message : e);
+    console.warn("[WHATSAPP] failed to send:", e?.message || e);
   }
 }
 
-// Exports
+// ---------------- Exports ----------------
 module.exports = {
   sendBill,
   sendBillEmail,
   sendBillWhatsApp,
-  _sendBillEmailNow, // immediate send used in some controller flows
+  _sendBillEmailNow,
   _removePendingEmailsForBill,
-  // expose config for debugging
   _config: {
     twilioConfigured,
-    waCloudConfigured,
     backendBase,
     frontendBase,
   },
