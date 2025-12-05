@@ -179,9 +179,9 @@ function whatsappBody(bill) {
   const billStatus = isPaid ? "Status: Paid ✅" : "Status: Not Paid ❌";
 
   // Determine action (Generated / Updated / Paid Successfully)
-  let actionText = "Generated";
-  if ((bill.paymentStatus || bill.status || "").toLowerCase() === "paid") actionText = "Paid Successfully";
-  else if (bill.updatedAt && bill.createdAt && new Date(bill.updatedAt) - new Date(bill.createdAt) > 2000) actionText = "Updated";
+  let actionText = "generated";
+  if ((bill.paymentStatus || bill.status || "").toLowerCase() === "paid") actionText = "paid successfully";
+  else if (bill.updatedAt && bill.createdAt && new Date(bill.updatedAt) - new Date(bill.createdAt) > 2000) actionText = "updated";
 
   // Map variables safely
   return {
