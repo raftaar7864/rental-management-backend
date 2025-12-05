@@ -127,7 +127,7 @@ function renderHeader(doc, bill, x = doc.page.margins.left, pageWidth = doc.page
   // Company name
  // doc.font("Helvetica-Bold").fontSize(16).text(companyName, textX, topY);
   doc.image(logoEnv, x, topY, { width: logoW, fit: [logoW, 60] });
- // doc.font("Helvetica").fontSize(8).text("DR. BISWAS GROUP OF COMPANIES", textX, topY + 20);
+  doc.font("Helvetica-Bold").fontSize(10).text("HOUSING COMPLEX", textX - 93, topY + 30);
 
   // invoice box
   const invoiceW = 160;
@@ -439,7 +439,7 @@ async function generateBillPdfBeforePaid(bill) {
       if (gst) doc.font("Helvetica").fontSize(9).text(`GST: ${gst}`, leftX + pageWidth - 220, footerY);
 
       // combine company name and computer-generated notice as requested
-      const footerNotice = `DB WELLNESS PRIVATE LIMITED\nThis is a computer generated invoice and does not require a signature.`;
+      const footerNotice = `© DB WELLNESS PRIVATE LIMITED\nThis is a computer generated invoice and does not require a signature.`;
       doc.font("Helvetica").fontSize(8).fillColor("#6b7280").text(footerNotice, leftX + pageWidth - 250, footerY + 30, { width: 400 });
 
       // watermark: UNPAID
@@ -521,7 +521,7 @@ async function generateBillPdfAfterPaid(bill) {
       if (gst) doc.font("Helvetica").fontSize(9).text(`GST: ${gst}`, leftX + pageWidth - 220, footerY);
 
       // combined footer notice as requested
-      const footerNotice = `DB WELLNESS PRIVATE LIMITED\nThis is a computer generated invoice and does not require a signature.`;
+      const footerNotice = `© DB WELLNESS PRIVATE LIMITED\nThis is a computer generated invoice and does not require a signature.`;
       doc.font("Helvetica").fontSize(8).fillColor("#6b7280").text(footerNotice, leftX + pageWidth - 250, footerY + 20, { width: 400 });
 
       // watermark: PAID
