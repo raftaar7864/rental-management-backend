@@ -151,16 +151,16 @@ function safeRoomNumber(bill) {
 
 function getActionText(bill) {
   const status = (bill.paymentStatus || bill.status || "").toLowerCase();
-  if (status === "paid") return "Paid Successfully";
+  if (status === "paid") return "paid successfully";
 
   // If bill has updatedAt > createdAt → updated
   if (bill.createdAt && bill.updatedAt) {
     if (new Date(bill.updatedAt).getTime() - new Date(bill.createdAt).getTime() > 2000) {
-      return "Updated";
+      return "updated";
     }
   }
 
-  return "Generated";
+  return "generated";
 }
 
 async function sendBillWhatsApp(bill) {
